@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+import base64
+import os
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import parse_qs
+import json
+import anthropic
+
+# Set your API key here or use environment variable
+API_KEY = os.environ.get('ANTHROPIC_API_KEY', 'YOUR_API_KEY_HERE')
+
+class PlantAnalyzerHandler(BaseHTTPRequestHandler):
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
+
+    def do_POST(self):
+        if self.path == '/analyze':
+            try:
+                content_length = int(self.headers['Content-Length'])
+                content_type = self.headers['Content-Type']
+                
+                # Parse multipart form data
+                boundary = content_type.split('boundary=')[1].encode()
+                body = self.rfile.read(content_length)
+                
+                # Extract form fields
+                parts = body.split(b'--' + boundary)
+                plant_name = ''
+                symptoms = ''
+                image_data = None
+                image_type = ''
+                
+                for part in parts:
+                    if b'name="plant_name"' in part:
+                        plant_name = part.split(b'\r\n\r\n')[1].split(b'\r\n')[0].decode()
+                    elif b'name="symptoms"' in part:
+                        symptoms = part.split(b'\r\n\r\n')[1].split(b'\r\n')[0].decode()
+                    elif b'name="image"' in part:
+                        header_end = part.find(b'\r\n\r\n')
+                        if header_end != -1:
+                            headers = part[:header_end].decode()
+                            if 'image/jpeg' in headers:
+                                image_type = 'image/jpeg'
+                            elif 'image/png' in headers:
+                                image_type = 'image/png'
+                            elif 'image/jpg' in headers:
+                                image_type = 'image/jpeg'
+                            elif 'image/webp' in headers:
+                                image_type = 'image/webp'
+                            
+                            image_data = part[header_end + 4:]
+                            if image_data.endswith(b'\r\n'):
+                                image_data = image_data[:-2]
+                
+                if not image_data:
+                    raise ValueError('No image data received')
+                
+                # Convert to base64
+                base64_image = base64.b64encode(image_data).decode('utf-8')
+                
+                # Call Claude API
+                client = anthropic.Anthropic(api_key=API_KEY)
+                
+                message = client.messages.create(
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=4000,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": image_type,
+                                    "data": base64_image
+                                }
+                            },
+                            {
+                                "type": "text",
+                                "text": f"""You are an expert plant pathologist and horticulturist. Analyze this plant photo and provide a detailed diagnostic assessment.
+
+Plant Name: {plant_name}
+Observed Symptoms: {symptoms}
+
+Please provide a comprehensive analysis in the following structure:
+
+1. NUTRIENT DEFICIENCIES
+- Identify any visible nutrient deficiencies (N, P, K, Ca, Mg, Fe, etc.)
+- Describe the visual symptoms you observe
+- Rate severity as High, Medium, or Low
+- Provide specific treatment recommendations
+
+2. DISEASES
+- Identify any fungal, bacterial, or viral diseases
+- Describe the diagnostic features you observe
+- Rate severity and provide treatment options
+
+3. ENVIRONMENTAL ISSUES
+- Identify any environmental stress factors (light, water, temperature, humidity)
+- Explain how these manifest in the plant's appearance
+- Provide specific care recommendations
+
+4. OVERALL HEALTH ASSESSMENT
+- Summary of the plant's condition
+- Priority action items
+- Long-term care recommendations
+
+Be specific, detailed, and practical in your recommendations. Format your response clearly with headers and bullet points."""
+                            }
+                        ]
+                    }]
+                )
+                
+                analysis = message.content[0].text
+                
+                # Send response
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'analysis': analysis}).encode())
+                
+            except Exception as e:
+                print(f"Error: {e}")
+                self.send_response(500)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': str(e)}).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+if __name__ == '__main__':
+    print("Starting Plant Analyzer Server on http://localhost:8000")
+    print("Make sure to set your ANTHROPIC_API_KEY environment variable")
+    print("Or edit the API_KEY variable in this script")
+    server = HTTPServer(('localhost', 8000), PlantAnalyzerHandler)
+    server.serve_forever()
